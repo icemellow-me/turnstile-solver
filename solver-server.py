@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3
 """
 Turnstile + Cloudflare Challenge Solver Server
 2captcha-compatible API + FlareSolverr-style API
