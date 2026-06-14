@@ -4,145 +4,65 @@ Self-hosted Cloudflare Turnstile + JS Challenge solver with a 2captcha-compatibl
 
 Also includes a **FlareSolverr-compatible API** for drop-in replacement.
 
-## What It Solves
+## Features
+- **Non-interactive Turnstile** — solves automatically via headless Chrome
+- **Cloudflare JS challenges** — waits for cf_clearance cookies
+- **CaptchaPlugin extension support** — loads extension for managed challenges
+- **System Chrome** — uses `/usr/bin/chromium` to avoid Playwright fingerprinting
+- **Persistent browser context** — extension loads properly with `launch_persistent_context`
+- **2captcha-compatible API** — drop-in replacement for any 2captcha client
+- **FlareSolverr API** — POST /v1 for FlareSolverr-compatible requests
 
-- ✅ **Cloudflare Turnstile** (interactive checkbox widgets)
-- ✅ **Cloudflare Managed Challenges** (invisible/auto-resolving)
-- ✅ **Cloudflare JS Challenges** ("Just a moment... / Checking your browser")
-- ✅ Returns `cf_clearance` cookies and/or `cf-turnstile-response` tokens
-
-## How It Works
-
-1. Launches a **stealth Chromium** instance via Playwright
-2. Injects anti-detection scripts (removes `navigator.webdriver`, fakes plugins, etc.)
-3. Navigates to the target page
-4. **Auto-detects** challenge type or uses the specified method
-5. For Turnstile widgets: detects iframe → clicks checkbox → extracts token
-6. For JS challenges: waits for auto-resolution → extracts `cf_clearance` cookie
-7. Returns results via API
-
-## Install
+## Quick Start
 
 ```bash
+# Install dependencies
 pip install playwright aiohttp
 playwright install chromium
-```
 
-## Usage
+# Or use install script
+bash install-solvers.sh
 
-```bash
-# Start the solver server
+# Run solver
 python3 solver-server.py --api-key YOUR_KEY --port 8877
+
+# Non-headless mode (better for managed challenges)
+python3 solver-server.py --api-key YOUR_KEY --port 8877 --no-headless
+
+# With CaptchaPlugin extension
+python3 solver-server.py --api-key YOUR_KEY --port 8877 --ext-path /path/to/extension
 ```
 
-### With Xvfb (headless server)
+## API Usage
 
+### Submit task
 ```bash
-Xvfb :100 -screen 0 1920x1080x24 &
-export DISPLAY=:100
-python3 solver-server.py --api-key YOUR_KEY --port 8877
+curl -X POST http://localhost:8877/in.php \
+  -d "method=turnstile" \
+  -d "key=YOUR_KEY" \
+  -d "sitekey=0x4AAAAAAA..." \
+  -d "pageurl=https://example.com/page"
 ```
 
-## API
-
-### 2captcha-compatible API
-
-**Submit a Turnstile task:**
-```
-POST /in.php
-key=YOUR_KEY&method=turnstile&sitekey=SITE_KEY&pageurl=https://example.com
-```
-Response: `OK|task_id`
-
-**Submit a Cloudflare challenge:**
-```
-POST /in.php
-key=YOUR_KEY&method=challenge&pageurl=https://protected-site.com
+### Poll result
+```bash
+curl "http://localhost:8877/res.php?key=YOUR_KEY&id=TASK_ID"
 ```
 
-**Get result:**
-```
-GET /res.php?key=YOUR_KEY&action=get&id=task_id
-```
-- `CAPCHA_NOT_READY` — still processing
-- `OK|token_value` — solved successfully
-- `ERROR_CAPTCHA_UNSOLVABLE` — failed
-
-### FlareSolverr-compatible API
-
-```json
-POST /v1
-{
-  "cmd": "request.get",
-  "url": "https://protected-site.com",
-  "maxTimeout": 60000
-}
+### Health check
+```bash
+curl http://localhost:8877/health
 ```
 
-Response:
-```json
-{
-  "status": "ok",
-  "solution": {
-    "url": "https://protected-site.com",
-    "cookies": {"cf_clearance": "..."},
-    "userAgent": "...",
-    "html": "..."
-  }
-}
-```
+## Supported Challenge Types
+| Type | Sitekey Prefix | Status |
+|------|---------------|--------|
+| Non-interactive | `0x4AAAAAAAax...` | ✅ Working |
+| Managed | `0x4AAAAAAAiw...` | ⚠️ Needs CaptchaPlugin extension |
+| Invisible | varies | ✅ Working |
 
-### Health Check
-
-```
-GET /health
-```
-
-## Architecture
-
-```
-solver-server.py     # Main server: HTTP API + Playwright automation
-├── TurnstileSolver  # Browser automation engine
-│   ├── _solve_turnstile()   # Interactive Turnstile widgets
-│   ├── _solve_challenge()   # JS challenges (auto-wait)
-│   ├── _solve_managed()     # Managed/invisible challenges
-│   └── _solve_auto()        # Auto-detect challenge type
-├── 2captcha API     # /in.php + /res.php
-└── FlareSolverr API # /v1
-```
-
-## Detection Strategy
-
-The solver auto-detects challenge type by examining the page:
-- **"Just a moment"** title → JS challenge → wait for `cf_clearance`
-- **`challenges.cloudflare.com` iframe** → Turnstile → click + extract token
-- **No visible challenge** → Managed → wait for auto-resolution
-
-## Anti-Detection
-
-Built-in stealth measures:
-- Removes `navigator.webdriver` flag
-- Fakes plugin array (Chrome PDF Plugin, etc.)
-- Overrides `navigator.languages`
-- Adds `window.chrome.runtime`
-- Uses realistic user agent and viewport
-- Supports Firefox (`--browser firefox`) for better fingerprint evasion
-
-## Comparison with FlareSolverr
-
-| Feature | FlareSolverr | This Project |
-|---------|-------------|--------------|
-| JS Challenges | ✅ | ✅ |
-| Turnstile Widgets | ❌ | ✅ |
-| 2captcha API | ❌ | ✅ |
-| FlareSolverr API | ✅ | ✅ |
-| Auto-detect | ❌ | ✅ |
-| Stealth Scripts | Basic | Advanced |
-
-## TODO
-
-- [ ] Add camoufox/nodriver integration for better fingerprint evasion
-- [ ] Support Turnstile on sites that require interaction first
-- [ ] Add proxy rotation support
-- [ ] Add session persistence (reuse cookies)
-- [ ] Support Cloudflare WAF challenges
+## Requirements
+- Python 3.11+
+- Chromium browser
+- Xvfb (for non-headless mode on servers)
+- aiohttp, playwright

@@ -73,11 +73,12 @@ class TurnstileSolver:
     """
 
     def __init__(self, api_key: str, port: int = 8877, max_sessions: int = 3,
-                 headless: bool = True, browser_type: str = "chromium"):
+                 headless: bool = True, browser_type: str = "chromium", ext_path: str = ""):
         self.api_key = api_key
         self.port = port
         self.max_sessions = max_sessions
         self.headless = headless
+        self.ext_path = ext_path
         self.browser_type = browser_type
         self.tasks: Dict[str, TurnstileTask] = {}
         self.active_sessions = 0
@@ -90,10 +91,14 @@ class TurnstileSolver:
     async def start(self):
         """Initialize browser pool and start solver loop."""
         from playwright.async_api import async_playwright
+        import tempfile
         
         self._playwright = await async_playwright().start()
         
-        # Launch browser with stealth settings
+        # Use persistent context for extension support
+        CAPTCHA_EXT_PATH = self.ext_path or os.environ.get('CAPTCHA_EXT_PATH', '/opt/recaptcha-v2-solver/extension')
+        self._user_data_dir = tempfile.mkdtemp(prefix='turnstile-browser-')
+        
         launch_args = [
             '--no-sandbox',
             '--disable-blink-features=AutomationControlled',
@@ -106,17 +111,28 @@ class TurnstileSolver:
             '--disable-renderer-backgrounding',
             '--no-first-run',
             '--no-default-browser-check',
+            f'--load-extension={CAPTCHA_EXT_PATH}',
+            f'--disable-extensions-except={CAPTCHA_EXT_PATH}',
         ]
         
         if self.headless:
             launch_args.append('--headless=new')
         
-        self._browser = await self._playwright.chromium.launch(
+        self._browser = await self._playwright.chromium.launch_persistent_context(
+            self._user_data_dir,
             headless=self.headless,
             args=launch_args,
+            executable_path='/usr/bin/chromium',
+            viewport={'width': 1920, 'height': 1080},
+            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36',
+            locale='en-US',
+            timezone_id='America/New_York',
+            extra_http_headers={'Accept-Language': 'en-US,en;q=0.9'},
         )
+        # Wait for extension to initialize
+        await asyncio.sleep(5)
         
-        log.info(f"Browser launched: {self.browser_type} (headless={self.headless})")
+        log.info(f"Browser launched: {self.browser_type} (headless={self.headless}), ext={CAPTCHA_EXT_PATH}")
         
         # Start solver workers
         for i in range(self.max_sessions):
@@ -161,42 +177,13 @@ class TurnstileSolver:
 
     async def _solve_task(self, task: TurnstileTask) -> bool:
         """Solve a single Turnstile/challenge task with timeout protection."""
-        context = None
         page = None
         try:
-            context = await self._browser.new_context(
-                viewport={'width': 1920, 'height': 1080},
-                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-                locale='en-US',
-                timezone_id='America/New_York',
-                extra_http_headers={'Accept-Language': 'en-US,en;q=0.9'},
-            )
-            
-            # Anti-detection init script
-            await context.add_init_script("""
-                Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-                Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
-                window.chrome = { runtime: {} };
-                const originalQuery = window.navigator.permissions.query;
-                window.navigator.permissions.query = (parameters) => (
-                    parameters.name === 'notifications' ?
-                        Promise.resolve({ state: Notification.permission }) :
-                        originalQuery(parameters)
-                );
-                Object.defineProperty(navigator, 'plugins', {
-                    get: () => {
-                        const arr = [
-                            { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer' },
-                            { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai' },
-                            { name: 'Native Client', filename: 'internal-nacl-plugin' },
-                        ];
-                        arr.refresh = () => {};
-                        return arr;
-                    },
-                });
-            """)
-            
-            page = await context.new_page()
+            # Persistent context — get existing page or create new one
+            if len(self._browser.pages) > 0:
+                page = self._browser.pages[0]
+            else:
+                page = await self._browser.new_page()
             page.set_default_timeout(30000)
             
             # Run solve with overall 120s timeout to prevent worker hangs
@@ -227,11 +214,7 @@ class TurnstileSolver:
                     task.html = await page.content()
                 except:
                     pass
-            if context:
-                try:
-                    await context.close()
-                except:
-                    pass
+            # persistent context — no cleanup per task
 
     async def _extract_turnstile_token(self, page) -> Optional[str]:
         """Extract Turnstile token from all possible sources."""
@@ -278,6 +261,10 @@ class TurnstileSolver:
                     const successInput = iframe.parentElement?.querySelector('input[name="cf-turnstile-response"]');
                     if (successInput && successInput.value && successInput.value.length > 10) return successInput.value;
                 }
+                // Method 6: Check intercepted token from init script
+                if (window.__turnstile_token && window.__turnstile_token.length > 20) {
+                    return window.__turnstile_token;
+                }
                 return null;
             }
         """)
@@ -309,7 +296,7 @@ class TurnstileSolver:
                 
                 # First check if token already exists (auto-solved / managed challenge)
                 token = await self._extract_turnstile_token(page)
-                if token:
+                if token and "DUMMY" not in token and "XXXX" not in token and not token.startswith("test"):
                     log.info(f"Token already present (auto-solved): {token[:40]}...")
                     break
                 
@@ -365,11 +352,11 @@ class TurnstileSolver:
                     for wait in range(25):
                         await asyncio.sleep(1)
                         token = await self._extract_turnstile_token(page)
-                        if token:
+                        if token and "DUMMY" not in token and "XXXX" not in token and not token.startswith("test"):
                             log.info(f"Turnstile token obtained after {wait+1}s: {token[:40]}...")
                             break
                     
-                    if token:
+                    if token and "DUMMY" not in token and "XXXX" not in token and not token.startswith("test"):
                         break
                 else:
                     # Check for the widget container (sometimes iframe loads late)
@@ -392,7 +379,7 @@ class TurnstileSolver:
             
             await asyncio.sleep(2)
         
-        if token:
+        if token and "DUMMY" not in token and "XXXX" not in token and not token.startswith("test"):
             task.token = token
             try:
                 task.html = await page.content()
@@ -486,7 +473,7 @@ class TurnstileSolver:
                 }
             """)
             
-            if token:
+            if token and "DUMMY" not in token and "XXXX" not in token and not token.startswith("test"):
                 task.token = token
                 task.html = await page.content()
                 return True
@@ -725,6 +712,8 @@ async def main():
     parser.add_argument('--port', type=int, default=8877, help='HTTP API port (default: 8877)')
     parser.add_argument('--max-sessions', type=int, default=3, help='Max concurrent browser sessions')
     parser.add_argument('--no-headless', action='store_true', help='Run browser in visible mode')
+    parser.add_argument('--ext-path', default=os.environ.get('CAPTCHA_EXT_PATH', '/opt/recaptcha-v2-solver/extension'),
+                       help='Path to CaptchaPlugin extension for managed challenges')
     parser.add_argument('--browser', default='chromium', choices=['chromium', 'firefox'],
                        help='Browser engine to use')
     args = parser.parse_args()
@@ -735,6 +724,7 @@ async def main():
         max_sessions=args.max_sessions,
         headless=not args.no_headless,
         browser_type=args.browser,
+        ext_path=args.ext_path,
     )
     
     await solver.start()
