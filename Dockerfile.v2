@@ -1,0 +1,23 @@
+FROM python:3.13-slim-trixie
+
+# Install browser + deps
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    chromium chromium-driver \
+    tesseract-ocr \
+    fonts-liberation libnss3 libxss1 libasound2t64 \
+    libatk-bridge2.0-0 libgtk-3-0 libgbm1 \
+    libx11-xcb1 xdg-utils wget xvfb \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python packages
+RUN pip install --no-cache-dir nodriver camoufox
+
+# Pre-download camoufox browser
+RUN python3 -c "from camoufox.sync_api import Camoufox; print('camoufox browser downloaded')" || echo "camoufox download attempted"
+
+ENV CHROME_PATH=/usr/bin/chromium
+EXPOSE 8878
+
+COPY solver-server-v2.py /app/solver-server-v2.py
+
+CMD ["python3", "/app/solver-server-v2.py", "--api-key", "8010000000ccojr5nrbg516w5jvw1wu9", "--port", "8878"]

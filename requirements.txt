@@ -1,0 +1,4 @@
+aiohttp>=3.14
+nodriver>=0.50
+camoufox>=0.4
+playwright>=1.60
